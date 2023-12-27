@@ -9,6 +9,7 @@ import binascii
 import time
 import codecs
 from urllib.parse import urlparse, parse_qs, quote_plus
+from urllib3.util import SKIP_HEADER
 from xml.sax.saxutils import escape as xml_escape
 import xml.etree.ElementTree as ET
 from xml.dom.minidom import parseString
@@ -18,10 +19,11 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.kbkdf import CounterLocation, KBKDFHMAC, Mode
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from roadtools.roadlib.constants import WELLKNOWN_RESOURCES, WELLKNOWN_CLIENTS, WELLKNOWN_USER_AGENTS, \
+    DSSO_BODY_KERBEROS, DSSO_BODY_USERPASS
 import requests
 import adal
 import jwt
-
 
 
 WELLKNOWN_RESOURCES = {
@@ -140,6 +142,7 @@ class Authentication():
         self.outfile = None
         self.debug = False
         self.scope = None
+        self.user_agent = None
 
     def get_authority_url(self, default_tenant='common'):
         """
@@ -162,6 +165,15 @@ class Authentication():
         """
         self.resource_uri = self.lookup_resource_uri(uri)
 
+    def set_user_agent(self, useragent):
+        """
+        Overrides user agent (accepts aliases)
+        """
+        self.user_agent = self.lookup_user_agent(useragent)
+        # Patch it in adal too in case we fall back to that
+        #pylint: disable=protected-access
+        adal.oauth2_client._REQ_OPTION['headers']['User-Agent'] = self.user_agent
+
     def user_discovery(self, username):
         """
         Discover whether this is a federated user
@@ -169,7 +181,7 @@ class Authentication():
         # Tenant specific endpoint seems to not work for this?
         authority_uri = 'https://login.microsoftonline.com/common'
         user = quote_plus(username)
-        res = requests.get(f"{authority_uri}/UserRealm/{user}?api-version=2.0",  proxies=self.proxies, verify=self.verify)
+        res = self.requests_get(f"{authority_uri}/UserRealm/{user}?api-version=2.0")
         response = res.json()
         return response
 
@@ -217,7 +229,7 @@ class Authentication():
             data['client_secret'] = client_secret
         if additionaldata:
             data = {**data, **additionaldata}
-        res = requests.post(f"{authority_uri}/oauth2/token", data=data, proxies=self.proxies, verify=self.verify)
+        res = self.requests_post(f"{authority_uri}/oauth2/token", data=data)
         if res.status_code != 200:
             raise AuthenticationException(res.text)
         tokenreply = res.json()
@@ -244,7 +256,7 @@ class Authentication():
             data['client_secret'] = client_secret
         if additionaldata:
             data = {**data, **additionaldata}
-        res = requests.post(f"{authority_uri}/oauth2/v2.0/token", data=data, proxies=self.proxies, verify=self.verify)
+        res = self.requests_post(f"{authority_uri}/oauth2/v2.0/token", data=data)
         if res.status_code != 200:
             raise AuthenticationException(res.text)
         tokenreply = res.json()
@@ -308,7 +320,7 @@ class Authentication():
             data['client_secret'] = client_secret
         if additionaldata:
             data = {**data, **additionaldata}
-        res = requests.post(f"{authority_uri}/oauth2/token", data=data, proxies=self.proxies, verify=self.verify)
+        res = self.requests_post(f"{authority_uri}/oauth2/token", data=data)
         if res.status_code != 200:
             raise AuthenticationException(res.text)
         tokenreply = res.json()
@@ -336,7 +348,7 @@ class Authentication():
             data['client_secret'] = client_secret
         if additionaldata:
             data = {**data, **additionaldata}
-        res = requests.post(f"{authority_uri}/oauth2/v2.0/token", data=data, proxies=self.proxies, verify=self.verify)
+        res = self.requests_post(f"{authority_uri}/oauth2/v2.0/token", data=data)
         if res.status_code != 200:
             raise AuthenticationException(res.text)
         tokenreply = res.json()
@@ -364,7 +376,7 @@ class Authentication():
             data = {**data, **additionaldata}
         if pkce_secret:
             raise NotImplementedError
-        res = requests.post(f"{authority_uri}/oauth2/token", data=data, proxies=self.proxies, verify=self.verify)
+        res = self.requests_post(f"{authority_uri}/oauth2/token", data=data)
         if res.status_code != 200:
             raise AuthenticationException(res.text)
         tokenreply = res.json()
@@ -393,7 +405,7 @@ class Authentication():
             data = {**data, **additionaldata}
         if pkce_secret:
             raise NotImplementedError
-        res = requests.post(f"{authority_uri}/oauth2/v2.0/token", data=data, proxies=self.proxies, verify=self.verify)
+        res = self.requests_post(f"{authority_uri}/oauth2/v2.0/token", data=data)
         if res.status_code != 200:
             raise AuthenticationException(res.text)
         tokenreply = res.json()
@@ -416,7 +428,7 @@ class Authentication():
             "client_info":1,
             "windows_api_version":"2.0"
         }
-        res = requests.post(f"{authority_uri}/oauth2/token", data=data, proxies=self.proxies, verify=self.verify)
+        res = self.requests_post(f"{authority_uri}/oauth2/token", data=data)
         if res.status_code != 200:
             raise AuthenticationException(res.text)
         prtdata = res.text
@@ -437,7 +449,7 @@ class Authentication():
         }
         if additionaldata:
             data = {**data, **additionaldata}
-        res = requests.post(f"{authority_uri}/oauth2/token", data=data, proxies=self.proxies, verify=self.verify)
+        res = self.requests_post(f"{authority_uri}/oauth2/token", data=data)
         if res.status_code != 200:
             raise AuthenticationException(res.text)
         tokenreply = res.json()
@@ -461,7 +473,7 @@ class Authentication():
         }
         if additionaldata:
             data = {**data, **additionaldata}
-        res = requests.post(f"{authority_uri}/oauth2/v2.0/token", data=data, proxies=self.proxies, verify=self.verify)
+        res = self.requests_post(f"{authority_uri}/oauth2/v2.0/token", data=data)
         if res.status_code != 200:
             raise AuthenticationException(res.text)
         tokenreply = res.json()
@@ -495,7 +507,7 @@ class Authentication():
                 'Content-Type':'application/soap+xml; charset=utf-8',
                 'SOAPAction': 'http://schemas.xmlsoap.org/ws/2005/02/trust/RST/Issue',
             }
-            res = requests.post(f'https://autologon.microsoftazuread-sso.com/{self.tenant}/winauth/trust/2005/usernamemixed?client-request-id=19ac39db-81d2-4713-8046-b0b7240592be', headers=headers, data=rbody, proxies=self.proxies, verify=self.verify)
+            res = self.requests_post(f'https://autologon.microsoftazuread-sso.com/{self.tenant}/winauth/trust/2005/usernamemixed?client-request-id=19ac39db-81d2-4713-8046-b0b7240592be', headers=headers, data=rbody)
             tree = ET.fromstring(res.content)
             els = tree.findall('.//DesktopSsoToken')
             if len(els) > 0:
@@ -516,7 +528,7 @@ class Authentication():
                 'SOAPAction': 'http://schemas.xmlsoap.org/ws/2005/02/trust/RST/Issue',
                 'Authorization': f'Negotiate {krbtoken}'
             }
-            res = requests.post(f'https://autologon.microsoftazuread-sso.com/{self.tenant}/winauth/trust/2005/windowstransport?client-request-id=19ac39db-81d2-4713-8046-b0b7240592be', headers=headers, data=rbody, proxies=self.proxies, verify=self.verify)
+            res = self.requests_post(f'https://autologon.microsoftazuread-sso.com/{self.tenant}/winauth/trust/2005/windowstransport?client-request-id=19ac39db-81d2-4713-8046-b0b7240592be', headers=headers, data=rbody)
             tree = ET.fromstring(res.content)
             els = tree.findall('.//DesktopSsoToken')
             if len(els) > 0:
@@ -551,7 +563,7 @@ class Authentication():
         authority_uri = self.get_authority_url()
         if additionaldata:
             data = {**data, **additionaldata}
-        res = requests.post(f"{authority_uri}/oauth2/token", headers=headers, data=data, proxies=self.proxies, verify=self.verify)
+        res = self.requests_post(f"{authority_uri}/oauth2/token", headers=headers, data=data)
         if res.status_code != 200:
             raise AuthenticationException(res.text)
         tokenreply = res.json()
@@ -560,6 +572,50 @@ class Authentication():
         self.tokendata = self.tokenreply_to_tokendata(tokenreply)
         return self.tokendata
 
+    def get_bulk_enrollment_token(self, access_token):
+        body = {
+            "pid": str(uuid.uuid4()),
+            "name": "bulktoken",
+            "exp": (datetime.datetime.now() + datetime.timedelta(days=90)).strftime('%Y-%m-%d %H:%M:%S')
+        }
+        headers = {
+            'Authorization': f'Bearer {access_token}'
+        }
+        url = 'https://login.microsoftonline.com/webapp/bulkaadjtoken/begin'
+        res = self.requests_post(url, json=body, headers=headers)
+        data = res.json()
+        state = data.get('state')
+        if not state:
+            print(f'No state returned. Server said: {data}')
+            return False
+
+        if state == 'CompleteError':
+            print(f'Error occurred: {data["resultData"]}')
+            return False
+
+        flowtoken = data.get('flowToken')
+        if not flowtoken:
+            print(f'Error. No flow token found. Data: {data}')
+            return False
+        print('Got flow token, polling for token creation')
+        url = 'https://login.microsoftonline.com/webapp/bulkaadjtoken/poll'
+        while True:
+            res = self.requests_get(url, params={'flowtoken':flowtoken}, headers=headers)
+            data = res.json()
+            state = data.get('state')
+            if not state:
+                print(f'No state returned. Server said: {data}')
+                return False
+            if state == 'CompleteError':
+                print(f'Error occurred: {data["resultData"]}')
+                return False
+            if state == 'CompleteSuccess':
+                tokenresult = json.loads(data['resultData'])
+                # The function below needs one so lets supply it
+                tokenresult['access_token'] = tokenresult['id_token']
+                self.tokendata = self.tokenreply_to_tokendata(tokenresult, client_id='b90d5b8f-5503-4153-b545-b31cecfaece2')
+                return self.tokendata
+            time.sleep(1.0)
 
     def build_auth_url(self, redirurl, response_type, scope=None, state=None):
         '''
@@ -736,7 +792,7 @@ class Authentication():
         Request server challenge (nonce) to use with a PRT
         """
         data = {'grant_type':'srv_challenge'}
-        res = requests.post('https://login.microsoftonline.com/common/oauth2/token', data=data, proxies=self.proxies, verify=self.verify)
+        res = self.requests_post('https://login.microsoftonline.com/common/oauth2/token', data=data)
         return res.json()
 
     def get_prt_cookie_nonce(self):
@@ -748,6 +804,9 @@ class Authentication():
         ses = requests.session()
         ses.proxies = self.proxies
         ses.verify = self.verify
+        if self.user_agent:
+            headers = {'User-Agent': self.user_agent}
+            ses.headers = headers
         params = {
             'resource': self.resource_uri,
             'client_id': self.client_id,
@@ -858,6 +917,9 @@ class Authentication():
         ses = requests.session()
         ses.proxies = self.proxies
         ses.verify = self.verify
+        if self.user_agent:
+            headers = {'User-Agent': self.user_agent}
+            ses.headers = headers
         authority_uri = self.get_authority_url()
         params = {
             'client_id': self.client_id,
@@ -884,9 +946,12 @@ class Authentication():
             coderedeemfunc = self.authenticate_with_code_native
 
         headers = {
-            'User-Agent': 'Mozilla/4.0 (compatible; MSIE 7.0; Windows NT 10.0; Win64; x64; Trident/7.0; .NET4.0C; .NET4.0E)',
             'UA-CPU': 'AMD64',
         }
+        if not self.user_agent:
+            # Add proper user agent if we don't have one yet
+            headers['User-Agent'] = 'Mozilla/4.0 (compatible; MSIE 7.0; Windows NT 10.0; Win64; x64; Trident/7.0; .NET4.0C; .NET4.0E)'
+
         cookies = {
             'x-ms-RefreshTokenCredential': cookie
         }
@@ -1012,6 +1077,10 @@ class Authentication():
         auth_parser.add_argument('--kdf-v1',
                                  action='store_true',
                                  help='Use the older KDF version for PRT auth, may not work with PRTs from modern OSs')
+        auth_parser.add_argument('-ua',
+                                 '--user-agent',
+                                 action='store',
+                                 help='User agent or UA alias to use when requesting tokens (default: python-requests/version)')
         auth_parser.add_argument('-f',
                                  '--tokenfile',
                                  action='store',
@@ -1067,8 +1136,8 @@ class Authentication():
             'accessToken': token,
             'tokenType': 'Bearer',
             'expiresOn': datetime.datetime.fromtimestamp(tokendata['exp']).strftime('%Y-%m-%d %H:%M:%S'),
-            'tenantId': tokendata['tid'],
-            '_clientId': tokendata['appid']
+            'tenantId': tokendata.get('tid'),
+            '_clientId': tokendata.get('appid')
         }
         return tokenobject, tokendata
 
@@ -1167,6 +1236,45 @@ class Authentication():
         except KeyError:
             return clid
 
+    @staticmethod
+    def lookup_user_agent(useragent):
+        """
+        Translate user agents aliases
+        """
+        if useragent is None:
+            return useragent
+        if useragent.upper() == 'EMPTY':
+            return SKIP_HEADER
+        try:
+            resolved = WELLKNOWN_USER_AGENTS[useragent.lower()]
+            return resolved
+        except KeyError:
+            return useragent
+
+    def requests_get(self, *args, **kwargs):
+        '''
+        Wrapper around requests.get to set all the options uniformly
+        '''
+        kwargs['proxies'] = self.proxies
+        kwargs['verify'] = self.verify
+        if self.user_agent:
+            headers = kwargs.get('headers',{})
+            headers['User-Agent'] = self.user_agent
+            kwargs['headers'] = headers
+        return requests.get(*args, timeout=30.0, **kwargs)
+
+    def requests_post(self, *args, **kwargs):
+        '''
+        Wrapper around requests.post to set all the options uniformly
+        '''
+        kwargs['proxies'] = self.proxies
+        kwargs['verify'] = self.verify
+        if self.user_agent:
+            headers = kwargs.get('headers',{})
+            headers['User-Agent'] = self.user_agent
+            kwargs['headers'] = headers
+        return requests.post(*args, timeout=30.0, **kwargs)
+
     def parse_args(self, args):
         self.username = args.username
         self.password = args.password
@@ -1179,6 +1287,7 @@ class Authentication():
         self.debug = args.debug
         self.set_resource_uri(args.resource)
         self.scope = args.scope
+        self.set_user_agent(args.user_agent)
 
         if not self.username is None and self.password is None:
             self.password = getpass.getpass()
@@ -1251,7 +1360,19 @@ class Authentication():
                     return self.authenticate_with_prt_v2(prt, sessionkey)
 
         except adal.adal_error.AdalError as ex:
-            print(ex.error_response['error_description'])
+            try:
+                print(f"Error during authentication: {ex.error_response['error_description']}")
+            except TypeError:
+                # Not all errors are objects
+                print(str(ex))
+            sys.exit(1)
+        except AuthenticationException as ex:
+            try:
+                error_data = json.loads(str(ex))
+                print(f"Error during authentication: {error_data['error_description']}")
+            except TypeError:
+                # No json
+                print(str(ex))
             sys.exit(1)
 
         # If we are here, no auth to try

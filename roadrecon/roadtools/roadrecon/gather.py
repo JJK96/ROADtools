@@ -22,7 +22,7 @@ from roadtools.roadlib.metadef.database import (
     lnk_group_member_group, lnk_group_member_serviceprincipal,
     lnk_group_member_user, lnk_group_owner_serviceprincipal,
     lnk_group_owner_user)
-from sqlalchemy import bindparam, func
+from sqlalchemy import bindparam, func, text
 from sqlalchemy.dialects.postgresql import insert as pginsert
 from sqlalchemy.orm import sessionmaker
 
@@ -122,6 +122,8 @@ def checktoken():
             auth.client_id = '1b730954-1685-4b74-9bfd-dac224a7b894'
         auth.tenant = token['tenantId']
         auth.tokendata = token
+        if 'useragent' in token:
+            auth.set_user_agent(token['useragent'])
         if 'refreshToken' in token:
             token = auth.authenticate_with_refresh(token)
             headers['Authorization'] = '%s %s' % (token['tokenType'], token['accessToken'])
@@ -194,7 +196,7 @@ def commit(session, dbtype, cache, ignore=False):
         cache
     )
 
-def commitlink(engine, cachedict, ignore=False):
+def commitlink(session, cachedict, ignore=False):
     global dburl
     for linktable, cache in cachedict.items():
         if 'postgresql' in dburl and ignore:
@@ -207,11 +209,10 @@ def commitlink(engine, cachedict, ignore=False):
         else:
             statement = linktable.insert()
         # print(cache)
-        with engine.begin() as conn:
-            conn.execute(
-                statement,
-                cache
-            )
+        session.execute(
+            statement,
+            cache
+        )
 
 def commitmfa(session, dbtype, cache):
     statement = dbtype.__table__.update().where(dbtype.objectId == bindparam('userid'))
@@ -508,6 +509,14 @@ async def run(args):
     headers = {
         'Authorization': '%s %s' % (token['tokenType'], token['accessToken'])
     }
+    if args.user_agent:
+        # Alias support, get temp auth object
+        auth = Authentication()
+        auth.set_user_agent(args.user_agent)
+        headers['User-Agent'] = auth.user_agent
+        # Store this in the token as well
+        token['useragent'] = auth.user_agent
+
     if not checktoken():
         return
     # Recreate DB
@@ -551,7 +560,7 @@ async def run(args):
         # Delete existing links to make sure we start with clean data
         for table in database.Base.metadata.tables.keys():
             if table.startswith('lnk_'):
-                dbsession.execute("DELETE FROM {0}".format(table))
+                dbsession.execute(text("DELETE FROM {0}".format(table)))
         dbsession.query(ApplicationRef).delete()
         dbsession.query(RoleAssignment).delete()
         dbsession.query(EligibleRoleAssignment).delete()
@@ -685,6 +694,8 @@ def getargs(gather_parser):
                                '--tenant',
                                action='store',
                                help='Tenant ID to gather, if this info is not stored in the token')
+    gather_parser.add_argument('-ua', '--user-agent', action='store',
+                                help='Custom user agent to use. By default aiohttp default user agent is used, and python-requests is used for token renewal')
 
 def main(args=None):
     global token, headers, dburl, urlcounter
