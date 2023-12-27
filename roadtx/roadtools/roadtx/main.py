@@ -521,6 +521,7 @@ def main():
         if not args.tokens_stdout:
             if args.scope:
                 print(f'Requesting token with scope {auth.scope}')
+                auth.scope = args.scope
             else:
                 print(f'Requesting token for resource {auth.resource_uri}')
         res = auth.get_tokens(args)

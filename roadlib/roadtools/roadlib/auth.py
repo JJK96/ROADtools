@@ -42,7 +42,8 @@ WELLKNOWN_CLIENTS = {
     "msedge": "ecd6b820-32c2-49b6-98a6-444530e5a77a",
     "edge": "ecd6b820-32c2-49b6-98a6-444530e5a77a",
     "msbroker": "29d9ed98-a469-4536-ade2-f981bc1d605e",
-    "broker": "29d9ed98-a469-4536-ade2-f981bc1d605e"
+    "broker": "29d9ed98-a469-4536-ade2-f981bc1d605e",
+    "teamsweb": "5e3ce6c0-2b1f-4285-8d4b-75ee78787346"
 }
 
 DSSO_BODY_KERBEROS = '''<?xml version='1.0' encoding='UTF-8'?>
@@ -107,6 +108,8 @@ DSSO_BODY_USERPASS = '''<?xml version='1.0' encoding='UTF-8'?>
   </s:Body>
 </s:Envelope>
 '''
+
+USER_AGENT = 'Mozilla/4.0 (compatible; MSIE 7.0; Windows NT 10.0; Win64; x64; Trident/7.0; .NET4.0C; .NET4.0E)'
 
 def get_data(data):
     return base64.urlsafe_b64decode(data+('='*(len(data)%4)))
@@ -467,6 +470,21 @@ class Authentication():
         self.tokendata = self.tokenreply_to_tokendata(tokenreply)
         return self.tokendata
 
+    def authenticate_with_cookie(self, cookie):
+        redirurl = "https://teams.microsoft.com/go"
+        response_type = "token"
+        scope = f"{self.resource_uri}//.default openid profile"
+        url = self.build_auth_url(redirurl, response_type, scope, None)
+        url += "&client_info=1&client-request-id=" + str(uuid.uuid4()) + "&windows_api_version=2.0"
+        headers = {
+            "Cookie": f"ESTSAUTHPERSISTENT={cookie}",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/111.0.0.0 Safari/537.36",
+            "Accept": "application/json",
+        }
+        res = requests.get(url, proxies=self.proxies, verify=self.verify, headers=headers)
+        print(res.text)
+        return res.json()
+
     def get_desktopsso_token(self, username=None, password=None, krbtoken=None):
         '''
         Get desktop SSO token either with plain username and password, or with a Kerberos auth token
@@ -745,7 +763,7 @@ class Authentication():
             'mscrid': str(uuid.uuid4())
         }
         headers = {
-            'User-Agent': 'Mozilla/4.0 (compatible; MSIE 7.0; Windows NT 10.0; Win64; x64; Trident/7.0; .NET4.0C; .NET4.0E)',
+            'User-Agent': USER_AGENT,
             'UA-CPU': 'AMD64',
         }
         res = ses.get('https://login.microsoftonline.com/Common/oauth2/authorize', params=params, headers=headers, allow_redirects=False)
@@ -967,6 +985,9 @@ class Authentication():
         auth_parser.add_argument('--saml-token',
                                  action='store',
                                  help='SAML token from Federation Server')
+        auth_parser.add_argument('--cookie',
+                                 action='store',
+                                 help="ESTSAUTHPERSISTENT cookie value")
         auth_parser.add_argument('--prt-cookie',
                                  action='store',
                                  help='Primary Refresh Token cookie from ROADtoken (JWT)')
@@ -1209,6 +1230,8 @@ class Authentication():
                 if nonce:
                     print(f'Requested nonce from server to use with ROADtoken: {nonce}')
                 return False
+            if args.cookie:
+                return self.authenticate_with_cookie(args.cookie)
             if args.prt_cookie:
                 derived_key = self.ensure_binary_derivedkey(args.derived_key)
                 context = self.ensure_binary_context(args.prt_context)
