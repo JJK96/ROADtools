@@ -12,6 +12,43 @@
   </mat-card-content>
 </mat-card>
 
+<mat-card *ngIf="directorysettings">
+  <mat-card-title>Directory settings</mat-card-title>
+  <mat-card-content>
+    <table class="userTable">
+      <tbody>
+        <tr *ngFor="let setting of directorysettings.values">
+          <ng-container *ngIf="setting.name === 'LockoutDurationInSeconds'">
+            <th>Lockout Duration</th>
+            <td>{{ setting.value }}</td>
+          </ng-container>
+          <ng-container *ngIf="setting.name === 'LockoutThreshold'">
+            <th>Lockout Threshold</th>
+            <td>{{ setting.value }}</td>
+          </ng-container>
+          <ng-container *ngIf="setting.name === 'BannedPasswordCheckOnPremisesMode'">
+            <th>Banned Password Check On-Premises Mode</th>
+            <td>{{ setting.value }}</td>
+          </ng-container>
+          <ng-container *ngIf="setting.name === 'EnableBannedPasswordCheckOnPremises'">
+            <th>Enable Banned Password Check On-Premises</th>
+            <td>{{ setting.value }}</td>
+          </ng-container>
+          <ng-container *ngIf="setting.name === 'EnableBannedPasswordCheck'">
+            <th>Enable Banned Password Check</th>
+            <td>{{ setting.value }}</td>
+          </ng-container>
+          <ng-container *ngIf="setting.name === 'BannedPasswordList'">
+            <th>Banned Password List</th>
+            <td>{{ setting.value }}</td>
+          </ng-container>
+          <!-- Add other conditions here as needed -->
+        </tr>
+      </tbody>
+    </table>
+  </mat-card-content>
+</mat-card>
+
 <mat-card *ngIf="tenantdetails">
   <mat-card-title>Tenant information</mat-card-title>
   <mat-card-content>
@@ -25,6 +62,7 @@
 <button mat-button (click)="showDetails()">View Raw</button>
   </mat-card-actions>
 </mat-card>
+
 
 <mat-card *ngIf="authorizationPolicy">
   <mat-card-title>Authorization Policy</mat-card-title>
@@ -40,11 +78,16 @@
         <tr><th>Application consent settings</th><td>
           <div *ngIf="authorizationPolicy.permissionGrantPolicyIdsAssignedToDefaultUserRole.length > 0; then thenBlock else elseBlock"></div>
           <ng-template #thenBlock>
-            <div [ngSwitch]="authorizationPolicy.permissionGrantPolicyIdsAssignedToDefaultUserRole[0]">
-              <span *ngSwitchCase="'ManagePermissionGrantsForSelf.microsoft-user-default-legacy'">Users can consent to apps (insecure old default)</span>
-              <span *ngSwitchCase="'ManagePermissionGrantsForSelf.microsoft-user-default-low'">Users can consent to limited permissions only (default)</span>
-              <span *ngSwitchDefault>Unknown: {{ authorizationPolicy.permissionGrantPolicyIdsAssignedToDefaultUserRole[0] }}</span>
+            <div *ngFor="let policy of authorizationPolicy.permissionGrantPolicyIdsAssignedToDefaultUserRole">
+              <div [ngSwitch]="policy">
+                <span *ngSwitchCase="'ManagePermissionGrantsForSelf.microsoft-user-default-legacy'">Users can consent to applications (insecure old default)</span>
+                <span *ngSwitchCase="'ManagePermissionGrantsForSelf.microsoft-user-default-low'">Users can consent to limited permissions only (default)</span>
+                <span *ngSwitchCase="'ManagePermissionGrantsForOwnedResource.microsoft-dynamically-managed-permissions-for-chat'">Resource specific consent for chats: Managed by Microsoft</span>
+                <span *ngSwitchCase="'ManagePermissionGrantsForOwnedResource.microsoft-dynamically-managed-permissions-for-team'">Resource specific consent for Teams: Managed by Microsoft</span>
+                <span *ngSwitchDefault>Unknown: {{ policy }}</span>
+              </div>
             </div>
+            <span *ngIf="!hasSelfConsentPolicy">User self-consent is disabled</span>
           </ng-template>
           <ng-template #elseBlock>User consent is disabled</ng-template>
         </td></tr>

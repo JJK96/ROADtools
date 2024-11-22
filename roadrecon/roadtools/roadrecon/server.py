@@ -7,7 +7,7 @@ from marshmallow import fields
 from roadtools.roadlib.metadef.database import User, JSON, Group, DirectoryRole, ServicePrincipal, AppRoleAssignment, TenantDetail, Application, Device, OAuth2PermissionGrant, AuthorizationPolicy, DirectorySetting, AdministrativeUnit, RoleDefinition
 import os
 import argparse
-from sqlalchemy import func
+from sqlalchemy import func, and_, or_, select
 import mimetypes
 
 app = Flask(__name__)
@@ -41,7 +41,7 @@ class RTModelSchema(ma.SQLAlchemyAutoSchema):
 class UsersSchema(ma.Schema):
     class Meta:
         model = User
-        fields = ('objectId', 'objectType', 'userPrincipalName', 'displayName', 'mail', 'lastDirSyncTime', 'accountEnabled', 'department', 'lastPasswordChangeDateTime', 'jobTitle', 'mobile', 'dirSyncEnabled', 'strongAuthenticationDetail', 'userType')
+        fields = ('objectId', 'objectType', 'userPrincipalName', 'displayName', 'mail', 'lastDirSyncTime', 'accountEnabled', 'department', 'lastPasswordChangeDateTime', 'jobTitle', 'mobile', 'dirSyncEnabled', 'strongAuthenticationDetail', 'userType', 'searchableDeviceKey')
 
 class DevicesSchema(ma.Schema):
     class Meta:
@@ -157,6 +157,10 @@ class TenantDetailSchema(RTModelSchema):
     class Meta(RTModelSchema.Meta):
         model = TenantDetail
 
+class DirectorySettingSchema(RTModelSchema):
+    class Meta(RTModelSchema.Meta):
+        model = DirectorySetting
+
 class AuthorizationPolicySchema(RTModelSchema):
     class Meta(RTModelSchema.Meta):
         model = AuthorizationPolicy
@@ -167,6 +171,7 @@ device_schema = DeviceSchema()
 group_schema = GroupSchema()
 application_schema = ApplicationSchema()
 td_schema = TenantDetailSchema()
+ds_schema = DirectorySettingSchema()
 serviceprincipal_schema = ServicePrincipalSchema()
 administrativeunit_schema = AdministrativeUnitSchema()
 authorizationpolicy_schema = AuthorizationPolicySchema(many=True)
@@ -288,10 +293,18 @@ def get_mfa():
     # for approle in per_user:
     #     enabledusers.append(approle.principalId)
 
-    # Filter out mailbox users by default
-    all_mfa = db.session.query(User).filter(User.cloudMSExchRecipientDisplayType != 0, User.cloudMSExchRecipientDisplayType != 7, User.cloudMSExchRecipientDisplayType != 18).all()
+    # Filter out mailbox-only users by default
+    all_mfa = db.session.execute(select(User).where(
+        or_(User.cloudMSExchRecipientDisplayType is None,
+            and_(
+                User.cloudMSExchRecipientDisplayType != 0,
+                User.cloudMSExchRecipientDisplayType != 7,
+                User.cloudMSExchRecipientDisplayType != 18
+            )
+        )
+    ))
     out = []
-    for user in all_mfa:
+    for user, in all_mfa: # pylint: disable=E1133
         mfa_methods = len(user.strongAuthenticationDetail['methods'])
         methods = [method['methodType'] for method in user.strongAuthenticationDetail['methods']]
         has_app = 'PhoneAppOTP' in methods or 'PhoneAppNotification' in methods
@@ -310,7 +323,8 @@ def get_mfa():
             'has_app': has_app,
             'has_phonenr': has_phonenr,
             'has_fido': has_fido,
-            'strongAuthenticationDetail': user.strongAuthenticationDetail
+            'strongAuthenticationDetail': user.strongAuthenticationDetail,
+            'searchableDeviceKey': user.searchableDeviceKey
         })
     return jsonify(out)
 
@@ -521,6 +535,11 @@ def get_tenantdetails():
     drs = db.session.query(TenantDetail).first()
     return td_schema.jsonify(drs)
 
+@app.route("/api/directorysettings", methods=["GET"])
+def get_directorysettings():
+    drs = db.session.query(DirectorySetting).first()
+    return ds_schema.jsonify(drs)
+
 @app.route("/api/authorizationpolicies", methods=["GET"])
 def get_authpolicies():
     drs = db.session.query(AuthorizationPolicy).all()
@@ -528,6 +547,7 @@ def get_authpolicies():
 
 @app.route("/api/stats", methods=["GET"])
 def get_stats():
+    # pylint: disable=not-callable
     stats = {
         'countUsers': db.session.query(func.count(User.objectId)).scalar(),
         'countGroups': db.session.query(func.count(Group.objectId)).scalar(),
@@ -563,6 +583,11 @@ def main(args=None):
         parser.add_argument('--profile',
                             action='store_true',
                             help='Enable flask profiler')
+        parser.add_argument('--port',
+                            type=int,
+                            action='store',
+                            help='HTTP Server port (default=5000)',
+                            default=5000)
         args = parser.parse_args()
     if not ':/' in args.database:
         if args.database[0] != '/':
@@ -575,7 +600,7 @@ def main(args=None):
     if args.profile:
         from werkzeug.middleware.profiler import ProfilerMiddleware
         app.wsgi_app = ProfilerMiddleware(app.wsgi_app, restrictions=[5])
-    app.run(debug=args.debug)
+    app.run(debug=args.debug, port=args.port)
 
 if __name__ == '__main__':
     main()

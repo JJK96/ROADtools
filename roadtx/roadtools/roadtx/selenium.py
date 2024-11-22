@@ -13,14 +13,37 @@ from selenium.webdriver.firefox.service import Service
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
+from selenium.common import exceptions
 from selenium.common.exceptions import TimeoutException, StaleElementReferenceException
 import pyotp
 
+# Decorator for selenium functions
+def selenium_wrap(func):
+    def wrapped(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except exceptions.NoSuchWindowException as exc:
+            if 'Browsing context has been discarded' in str(exc):
+                print('Browser window was closed by the user')
+                return False
+            raise exc
+        except exceptions.WebDriverException as exc:
+            if 'Failed to decode response from marionette' in str(exc):
+                print('Browser window closed by the user')
+                return False
+            raise exc
+        except KeyboardInterrupt:
+            print('Authentication was cancelled (KeyboardInterrupt raised)')
+            return False
+    return wrapped
+
 class SeleniumAuthentication():
-    def __init__(self, auth, deviceauth, redirurl, proxy=None):
-        if proxy and proxy.startswith('http'):
-            proxy = proxy.replace('http://','').replace('https://','')
+    def __init__(self, auth, deviceauth, redirurl, proxy=None, proxy_type="http"):
+        if proxy:
+            # Strip possible prefixes
+            proxy = proxy.replace('http://','').replace('https://','').replace('socks://','').replace('socks4://','').replace('socks5://','')
         self.proxy = proxy
+        self.proxy_type = proxy_type
         self.auth = auth
         self.deviceauth = deviceauth
         self.driver = None
@@ -37,6 +60,9 @@ class SeleniumAuthentication():
             if driverpath != 'geckodriver' and not os.path.exists(driverpath):
                 print('geckodriver not found! Required for selenium operation. Please download from https://github.com/mozilla/geckodriver/releases')
                 return False
+        else:
+            if os.path.exists('/snap/bin/geckodriver'):
+                driverpath = '/snap/bin/geckodriver'
         service = Service(executable_path=driverpath)
         return service
 
@@ -45,28 +71,21 @@ class SeleniumAuthentication():
         Load webdriver based on service, which is either
         from selenium or selenium-wire if interception is requested
         '''
-        if self.headless and self.proxy:
+        if self.proxy:
             options = {
                 'proxy': {
-                    'http': f'http://{self.proxy}',
-                    'https': f'https://{self.proxy}',
+                    'http': f'{self.proxy_type}://{self.proxy}',
+                    'https': f'{self.proxy_type}://{self.proxy}',
                     'no_proxy': 'localhost,127.0.0.1'
                 },
                 'request_storage': 'memory'
             }
-            firefox_options=FirefoxOptions()
-            firefox_options.add_argument("-headless")
-        elif self.proxy:
-            options = {
-                'proxy': {
-                    'http': f'http://{self.proxy}',
-                    'https': f'https://{self.proxy}',
-                    'no_proxy': 'localhost,127.0.0.1'
-                },
-                'request_storage': 'memory'
-            }
+            # Force intercept to add proxy
+            intercept = True
         else:
             options = {'request_storage': 'memory'}
+            if self.redir_has_custom_scheme():
+                intercept = True
         if intercept and self.headless:
             firefox_options=FirefoxOptions()
             firefox_options.add_argument("-headless")
@@ -86,6 +105,32 @@ class SeleniumAuthentication():
         except StaleElementReferenceException:
             return False
         return False
+
+    def redir_has_custom_scheme(self):
+        '''
+        Check whether the redirect URL has a custom scheme
+        In this case we try to replace this during the response since Firefox otherwise bugs out
+        '''
+        if not self.redirurl:
+            return False
+        parsed = urlparse(self.redirurl)
+        return not parsed.scheme.lower() in ('http', 'https')
+
+    def redir_interceptor(self, request, response):
+        '''
+        Intercept redirect response to replace custom scheme
+        '''
+        if request.url.startswith('https://login.microsoftonline.com/'):
+            # Microsoft seems to auto-lowercase the redirect URL internally, but only the hostname
+            if response.headers['Location'] and response.headers['Location'].lower().startswith(self.redirurl.lower()):
+                parsed = urlparse(response.headers['Location'])
+                newredir = "https://login.microsoftonline.com/common/oauth2/nativeclient"
+                if parsed.query:
+                    newredir += f'?{parsed.query}'
+                if parsed.fragment:
+                    newredir += f'#{parsed.fragment}'
+                del response.headers['Location']
+                response.headers['Location'] = newredir
 
     def get_keepass_cred(self, identity, filepath, password):
         '''
@@ -108,6 +153,7 @@ class SeleniumAuthentication():
             otpseed = None
         return userpassword, otpseed
 
+    @selenium_wrap
     def selenium_login(self, url, identity=None, password=None, otpseed=None, keep=False, capture=False, federated=False, devicecode=None):
         '''
         Selenium based login with optional autofill of whatever is provided
@@ -155,6 +201,8 @@ class SeleniumAuthentication():
                 driver.close()
             if capture:
                 return code
+            if self.auth.scope:
+                return self.auth.authenticate_with_code_native_v2(code, self.redirurl)
             return self.auth.authenticate_with_code_native(code, self.redirurl)
         except TimeoutException:
             pass
@@ -194,7 +242,7 @@ class SeleniumAuthentication():
                     raise AuthenticationException('Could not complete device code auth within the time limit (button not found: idSIButton9)')
         else:
             try:
-                WebDriverWait(driver, 120).until(lambda d: '?code=' in d.current_url)
+                WebDriverWait(driver, 1200).until(lambda d: '?code=' in d.current_url)
                 res = urlparse(driver.current_url)
                 params = parse_qs(res.query)
                 code = params['code'][0]
@@ -202,6 +250,8 @@ class SeleniumAuthentication():
                     driver.close()
                 if capture:
                     return code
+                if self.auth.scope:
+                    return self.auth.authenticate_with_code_native_v2(code, self.redirurl)
                 return self.auth.authenticate_with_code_native(code, self.redirurl)
             except TimeoutException:
                 if not keep:
@@ -217,8 +267,9 @@ class SeleniumAuthentication():
             del request.headers['User-Agent']
             request.headers['User-Agent'] = self.auth.user_agent
         self.driver.request_interceptor = interceptor
+        if self.redir_has_custom_scheme():
+            self.driver.response_interceptor = self.redir_interceptor
         return self.selenium_login(url, identity=identity, password=password, otpseed=otpseed, keep=keep, capture=capture, federated=federated, devicecode=devicecode)
-
 
     def selenium_login_with_prt(self, url, identity=None, password=None, otpseed=None, keep=False, prtcookie=None, capture=False):
         '''
@@ -252,6 +303,8 @@ class SeleniumAuthentication():
                                                                            self.deviceauth.session_key)
                         request.headers['X-Ms-Refreshtokencredential'] = cookie
         self.driver.request_interceptor = interceptor
+        if self.redir_has_custom_scheme():
+            self.driver.response_interceptor = self.redir_interceptor
         return self.selenium_login(url, identity, password, otpseed, keep=keep, capture=capture)
 
     def selenium_login_with_kerberos(self, url, identity=None, password=None, otpseed=None, keep=False, capture=False, krbdata=None):
@@ -276,6 +329,8 @@ class SeleniumAuthentication():
                     request.headers['Authorization'] = f'Negotiate {krbdata}'
 
         self.driver.request_interceptor = interceptor
+        if self.redir_has_custom_scheme():
+            self.driver.response_interceptor = self.redir_interceptor
         return self.selenium_login(url, identity, password, otpseed, keep=keep, capture=capture)
 
     def selenium_login_with_estscookie(self, url, identity=None, password=None, otpseed=None, keep=False, capture=False, estscookie=None):
@@ -299,8 +354,11 @@ class SeleniumAuthentication():
             request.headers['Cookie'] = f'ESTSAUTHPERSISTENT={estscookie}; ' + existing
 
         self.driver.request_interceptor = interceptor
+        if self.redir_has_custom_scheme():
+            self.driver.response_interceptor = self.redir_interceptor
         return self.selenium_login(url, identity, password, otpseed, keep=keep, capture=capture)
 
+    @selenium_wrap
     def selenium_enrich_prt(self, url, otpseed=None):
         '''
         Selenium authentication to add NGC MFA claim to a PRT or token.
@@ -314,10 +372,10 @@ class SeleniumAuthentication():
                 request.headers['User-Agent'] = self.auth.user_agent
             else:
                 request.headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; WebView/3.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/70.0.3538.102 Safari/537.36 Edge/18.19044'
-            request.headers['Sec-Ch-Ua'] = '" Not;A Brand";v="99", "Microsoft Edge";v="103", "Chromium";v="103"'
-            request.headers['Sec-Ch-Ua-Mobile'] =  '?0'
-            request.headers['Sec-Ch-Ua-Platform'] =  '"Windows"'
-            request.headers['Sec-Ch-Ua-Platform-Version'] = '"10.0.0"'
+                request.headers['Sec-Ch-Ua'] = '" Not;A Brand";v="99", "Microsoft Edge";v="103", "Chromium";v="103"'
+                request.headers['Sec-Ch-Ua-Mobile'] =  '?0'
+                request.headers['Sec-Ch-Ua-Platform'] =  '"Windows"'
+                request.headers['Sec-Ch-Ua-Platform-Version'] = '"10.0.0"'
 
             if request.url.startswith('https://login.microsoftonline.com') and self.deviceauth.prt:
                 if '/authorize' in request.url or '/login' in request.url or '/kmsi' in request.url or '/reprocess' in request.url or '/resume' in request.url:
@@ -345,12 +403,23 @@ class SeleniumAuthentication():
                     del response.headers['Content-Length']
                     response.headers['Content-Length'] = len(response.body)
 
+                # Microsoft seems to auto-lowercase the redirect URL internally
+                if response.headers['Location'] and response.headers['Location'].lower().startswith(self.redirurl.lower()):
+                    parsed = urlparse(response.headers['Location'])
+                    newredir = "https://login.microsoftonline.com/common/oauth2/nativeclient"
+                    if parsed.query:
+                        newredir += f'?{parsed.query}'
+                    if parsed.fragment:
+                        newredir += f'#{parsed.fragment}'
+                    del response.headers['Location']
+                    response.headers['Location'] = newredir
+
         self.driver.request_interceptor = interceptor
         self.driver.response_interceptor = response_interceptor
 
         driver = self.driver
         driver.get(url)
-        
+
         if otpseed:
             try:
                 els = WebDriverWait(driver, 4).until(lambda d: d.find_element(By.CSS_SELECTOR, '[data-value="PhoneAppOTP"]'))
@@ -366,8 +435,72 @@ class SeleniumAuthentication():
             except TimeoutException:
                 # No MFA?
                 pass
-        
+
         el = WebDriverWait(driver, 6000).until(lambda d: d.find_element(by=By.CSS_SELECTOR, value='form[name="hiddenform"] input[name="code"]'))
         code = el.get_property("value")
         driver.close()
         return self.auth.authenticate_with_code_encrypted(code, self.deviceauth.session_key, self.redirurl)
+
+    @selenium_wrap
+    def selenium_login_owatoken(self, owatoken):
+        def interceptor(request):
+            if request.url == 'https://outlook.office.com/owa/?init':
+                # Replace with owa request
+                req_url = "https://outlook.office.com:443/owa/"
+                req_cookies = {
+                    "ClientId": "AF0E07DCF04B42D3A1F0BA42E387B211",
+                    "OIDC": "1",
+                    "OpenIdConnect.nonce.v3.LTNEDyBePk9sAdZIbnys6v-YAcgFNTLDF9tdXKxWVp8":
+                    "638357308291354513.0509bcb8-3602-48c0-be52-fd59799eca11",
+                    "X-OWA-RedirectHistory": "ArLym14BkQ97-Jbm2wg"
+                }
+                req_headers = {
+                    "Cache-Control": "max-age=0",
+                    "Upgrade-Insecure-Requests": "1",
+                    "Origin": "https://login.microsoftonline.com",
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+                    "Sec-Fetch-Site": "cross-site",
+                    "Sec-Fetch-Mode": "navigate",
+                    "Sec-Fetch-Dest": "document",
+                    "Referer": "https://login.microsoftonline.com/",
+                    "Accept-Encoding": "gzip, deflate, br",
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Priority": "u=0, i"
+                }
+                if self.auth.user_agent:
+                    req_headers['User-Agent'] = self.auth.user_agent
+                else:
+                    req_headers['User-Agent'] = request.headers['User-Agent']
+                req_data = {
+                    "code": "ohnoesthisisempty",
+                    "id_token": owatoken,
+                    "Astate": "DctBFoAgCABRrNdxSBBJOI6abVt2_Vj82U0CgD1sIVEE2iUm2oSsOItWZTlJyccchnJRwWqTcCwt-NzqzX3NzpziPfL79fwD",
+                    "session_state": "56f4cbb9-6cc9-4150-a4b3-5b2865f916c9",
+                    "correlation_id": "2c13357a-eab7-97ed-bd48-8b50a6979bfc"
+                }
+                res = requests.post(req_url, allow_redirects=False, headers=req_headers, cookies=req_cookies, data=req_data, timeout=30.0)
+                request.create_response(
+                    status_code=res.status_code,
+                    headers=dict(res.headers),
+                    body=res.content
+                )
+        def resp_interceptor(request, response):
+            if request.url == 'https://outlook.office.com/owa/':
+                if response.headers.get('X-Ms-Diagnostics') and response.headers.get('Location','').startswith('https://login.microsoftonline.com'):
+                    diag = response.headers.get('X-Ms-Diagnostics')
+                    print(f'Error during auth: {diag}')
+                    del response.headers['Location']
+                    body = '<html><body><div name="youshouldquit">An error occurred (see command line)</div></body></html>'
+                    response.body = encoding.encode(body, response.headers.get('Content-Encoding', 'identity'))
+                    del response.headers['Content-Length']
+                    response.headers['Content-Length'] = len(response.body)
+
+
+        self.driver.request_interceptor = interceptor
+        self.driver.response_interceptor = resp_interceptor
+
+        driver = self.driver
+        driver.get("https://outlook.office.com/owa/?init")
+        el = WebDriverWait(driver, 6000).until(lambda d: d.find_element(by=By.CSS_SELECTOR, value='div[name="youshouldquit"]'))
+        driver.close()
